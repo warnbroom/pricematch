@@ -22,37 +22,32 @@ def clean_price(text):
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- LOGIC 1: LOTTE MART (CẬP NHẬT CHỐNG NHẦM GIÁ) ---
-def logic_lotte(page, search_key):
+# --- LOGIC QUÉT DỮ LIỆU ---
+
+def scrape_lotte(page, barcode):
+    """Bước 1: Tìm barcode trên Lotte"""
     try:
-        url = f"https://www.lottemart.vn/vi-nsg/category?q={search_key}"
+        url = f"https://www.lottemart.vn/vi-nsg/category?q={barcode}"
         page.goto(url, wait_until="networkidle", timeout=15000)
+        content = page.evaluate("() => document.body.innerText")
         
-        # KIỂM TRA 1: Nếu thấy dòng chữ báo không tìm thấy thì thoát luôn
-        no_result = page.query_selector("text='Không tìm thấy sản phẩm'")
-        if no_result:
+        if "Không tìm thấy sản phẩm" in content:
             return None
             
-        # KIỂM TRA 2: Chỉ bóc tách giá từ các thẻ sản phẩm thực (class chứa 'product-item')
-        # Điều này giúp loại bỏ các giá từ banner quảng cáo hoặc sản phẩm gợi ý ngoài danh sách
         product_list = page.query_selector(".product-list")
         if product_list:
-            content = product_list.inner_text()
-            if "₫" in content or "đ" in content:
-                lines = [l.strip() for l in content.split('\n') if l.strip()]
-                for line in lines:
-                    if "₫" in line or "đ" in line:
-                        price = clean_price(line)
-                        if 1000 < price < 10000000:
-                            return {"Nguồn": "Lotte Mart", "Giá TT": price, "Link": url}
-    except:
-        return None
+            text = product_list.inner_text()
+            if "₫" in text or "đ" in text:
+                price = clean_price(text)
+                if 1000 < price < 10000000:
+                    return {"Nguồn": "Lotte Mart (Barcode)", "Giá TT": price, "Link": url}
+    except: return None
     return None
 
-# --- LOGIC 2: GOOGLE SEARCH ---
-def logic_google(page, query):
+def scrape_google(page, search_key, mode="Barcode"):
+    """Bước 2 & 3: Tìm trên Google"""
     try:
-        url = f"https://www.google.com/search?q=giá+{query.replace(' ', '+')}"
+        url = f"https://www.google.com/search?q=giá+{search_key}"
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
         
         items = page.query_selector_all("div[class*='g']")
@@ -62,59 +57,56 @@ def logic_google(page, query):
                 price = clean_price(text)
                 if 1000 < price < 10000000:
                     link = item.query_selector("a").get_attribute("href") if item.query_selector("a") else ""
-                    return {"Nguồn": "Google Search", "Giá TT": price, "Link": link}
-    except:
-        return None
+                    return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
+    except: return None
     return None
 
-# --- ĐIỀU PHỐI ---
-def start_scraping(name, barcode, gia_niem_yet):
-    results = []
-    search_key = barcode if barcode else name
-    
+# --- ĐIỀU PHỐI THEO THỨ TỰ 1 -> 2 -> 3 ---
+def start_process(name, barcode, gia_niem_yet):
+    res = None
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        page = context.new_page()
+        page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-        # Bước 1: Quét Lotte Mart
-        lotte_res = logic_lotte(page, search_key)
+        # 1. Tìm Barcode trên Lotte
+        st.write("🔍 Đang tìm Barcode trên Lotte Mart...")
+        res = scrape_lotte(page, barcode)
         
-        if lotte_res:
-            results.append(lotte_res)
-        else:
-            # Bước 2: Nếu Lotte không có, quét Google
-            google_res = logic_google(page, name if name else barcode)
-            if google_res:
-                results.append(google_res)
+        # 2. Nếu thất bại, tìm Barcode trên Google
+        if not res:
+            st.write("⚠️ Lotte không có mã này. Đang thử tìm Barcode trên Google...")
+            res = scrape_google(page, barcode, mode="Barcode")
+            
+        # 3. Nếu vẫn thất bại, tìm Tên sản phẩm trên Google
+        if not res:
+            st.write("⚠️ Google không thấy giá qua Barcode. Đang tìm theo Tên sản phẩm...")
+            res = scrape_google(page, name, mode="Tên SP")
 
         browser.close()
+
+    if res and gia_niem_yet > 0:
+        diff = ((res['Giá TT'] - gia_niem_yet) / gia_niem_yet * 100)
+        res['Chênh lệch (%)'] = f"{diff:+.1f}%"
     
-    if results and gia_niem_yet > 0:
-        for r in results:
-            diff = ((r['Giá TT'] - gia_niem_yet) / gia_niem_yet * 100)
-            r['Chênh lệch (%)'] = f"{diff:+.1f}%"
-            
-    return results
+    return [res] if res else []
 
 # --- GIAO DIỆN ---
-st.title("🚀 Hệ Thống So Sánh Giá Genshai")
+st.title("🚀 Hệ Thống So Sánh Giá Genshai (V26.8)")
 
-with st.form("main_form"):
+with st.form("search_form"):
     c1, c2, c3 = st.columns(3)
     barcode_in = c1.text_input("Mã Barcode")
     name_in = c2.text_input("Tên sản phẩm")
     price_in = c3.number_input("Giá niêm yết", min_value=0)
-    submitted = st.form_submit_button("KIỂM TRA GIÁ")
+    submitted = st.form_submit_button("KIỂM TRA THEO THỨ TỰ")
 
 if submitted:
-    if not (barcode_in or name_in):
-        st.warning("Vui lòng nhập thông tin!")
+    if not (barcode_in and name_in):
+        st.error("Hưng cần nhập cả Barcode và Tên để thực hiện đủ 3 bước nhé!")
     else:
-        with st.spinner("Đang thực hiện logic quét (Lotte -> Google)..."):
-            final_data = start_scraping(name_in, barcode_in, price_in)
-            if final_data:
-                st.write("### Kết quả tìm thấy:")
-                st.dataframe(pd.DataFrame(final_data), use_container_width=True)
+        with st.spinner("Đang chạy quy trình so sánh..."):
+            final_results = start_process(name_in, barcode_in, price_in)
+            if final_results:
+                st.dataframe(pd.DataFrame(final_results), use_container_width=True)
             else:
-                st.error("Không tìm thấy kết quả phù hợp trên cả Lotte và Google.")
+                st.error("Cả 3 bước đều không tìm thấy giá phù hợp.")
