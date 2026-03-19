@@ -1,5 +1,9 @@
+import os
 import streamlit as st
-import pandas as pd
+
+# MẸO CHO CLOUD: Tự động cài đặt trình duyệt nếu chưa có
+if not os.path.exists("/home/adminuser/.cache/ms-playwright"):
+    os.system("playwright install chromium")import pandas as pd
 from playwright.sync_api import sync_playwright
 import re
 import time
