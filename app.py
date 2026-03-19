@@ -3,15 +3,23 @@ import pandas as pd
 from playwright.sync_api import sync_playwright
 import re
 import os
+import subprocess
 
-# Tự động cài đặt trình duyệt cho Streamlit Cloud
-try:
-    import playwright
-except ImportError:
-    os.system("pip install playwright")
-    os.system("playwright install chromium")
+# 1. CƠ CHẾ TỰ CÀI ĐẶT TRÌNH DUYỆT (Dành riêng cho Streamlit Cloud)
+def install_playwright():
+    try:
+        # Kiểm tra xem trình duyệt đã tồn tại chưa
+        with sync_playwright() as p:
+            p.chromium.launch()
+    except Exception:
+        # Nếu chưa có, tiến hành cài đặt cưỡng chế
+        st.info("Đang khởi tạo trình duyệt lần đầu (mất khoảng 30s), Hưng vui lòng đợi nhé...")
+        subprocess.run(["playwright", "install", "chromium"])
 
-# 1. CẤU HÌNH GIAO DIỆN
+# Gọi hàm cài đặt ngay khi app load
+install_playwright()
+
+# 2. CẤU HÌNH GIAO DIỆN
 st.set_page_config(page_title="Genshai Price Checker", layout="wide")
 
 def clean_price(text):
@@ -24,17 +32,18 @@ def fetch_data(query, barcode=None, gia_niem_yet=0):
     results = []
     try:
         with sync_playwright() as p:
-            # Nếu chạy trên Cloud mà vẫn lỗi, dòng này sẽ ép cài đặt lần nữa
+            # Cấu hình bypass các lớp chặn của Cloud
             browser = p.chromium.launch(
                 headless=True,
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             )
             page = context.new_page()
 
             search_key = barcode if barcode else query
+            
             # Quét Lotte Mart
             try:
                 lotte_url = f"https://www.lottemart.vn/vi-nsg/category?q={search_key}"
@@ -42,7 +51,7 @@ def fetch_data(query, barcode=None, gia_niem_yet=0):
                 content = page.evaluate("() => document.body.innerText")
                 if "₫" in content or "đ" in content:
                     lines = [l.strip() for l in content.split('\n') if l.strip()]
-                    for i, line in enumerate(lines):
+                    for line in lines:
                         if "₫" in line or "đ" in line:
                             price = clean_price(line)
                             if 1000 < price < 10000000:
@@ -66,28 +75,30 @@ def fetch_data(query, barcode=None, gia_niem_yet=0):
                             results.append({"Nguồn": "Google", "Giá TT": price, "Chênh lệch (%)": f"{diff:+.1f}%", "Link": link})
                             break
             except: pass
+            
             browser.close()
     except Exception as e:
-        st.error(f"Lỗi hệ thống trình duyệt: {str(e)}")
-        # Cố gắng cài đặt lại nếu lỗi
-        os.system("playwright install chromium")
+        st.error(f"Lỗi khởi động trình duyệt: {str(e)}")
     return results
 
 # --- GIAO DIỆN CHÍNH ---
-st.title("🚀 Genshai Price Tool")
+st.title("🚀 Hệ Thống So Sánh Giá Genshai")
 st.markdown("---")
 
 with st.form("check_form"):
     c1, c2, c3 = st.columns(3)
     barcode_in = c1.text_input("Mã Barcode")
     name_in = c2.text_input("Tên sản phẩm")
-    price_in = c3.number_input("Giá niêm yết", min_value=0)
-    submitted = st.form_submit_button("SO SÁNH GIÁ")
+    price_in = c3.number_input("Giá niêm yết (Genshai)", min_value=0)
+    submitted = st.form_submit_button("BẮT ĐẦU SO SÁNH")
 
 if submitted:
-    with st.spinner("Đang khởi tạo trình duyệt và quét giá..."):
-        data = fetch_data(name_in, barcode_in, price_in)
-        if data:
-            st.table(pd.DataFrame(data))
-        else:
-            st.error("Không có dữ liệu. Hãy thử lại sau 1 phút.")
+    if not (barcode_in or name_in):
+        st.warning("Hưng nhập thông tin vào đã nhé!")
+    else:
+        with st.spinner("Đang quét giá thị trường..."):
+            data = fetch_data(name_in, barcode_in, price_in)
+            if data:
+                st.dataframe(pd.DataFrame(data), use_container_width=True)
+            else:
+                st.info("Không tìm thấy kết quả phù hợp trên Lotte/Google.")
