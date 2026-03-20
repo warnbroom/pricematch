@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 
-# --- 1. SETUP HỆ THỐNG ---
+# --- 1. SETUP ---
 @st.cache_resource
 def install_browser():
     try:
@@ -19,7 +19,7 @@ st.set_page_config(page_title="Genshai Price Checker", layout="wide")
 
 def clean_price(text):
     if not text: return 0
-    # Xử lý mọi ký hiệu tiền tệ đặc biệt như trong hình Co.op Online
+    # Giữ lại số từ các định dạng giá phức tạp
     digits = re.sub(r'[^\d]', '', str(text))
     return int(digits) if digits else 0
 
@@ -37,36 +37,36 @@ def scrape_lotte(page, barcode):
         for line in lines:
             if "₫" in line or "đ" in line:
                 price = clean_price(line)
-                if 1000 < price < 150000: # Lọc mốc 150k ở bộ lọc
+                if 1000 < price < 150000: # Lọc giá rác
                     return {"Nguồn": "Lotte Mart", "Giá TT": price, "Link": url}
     except: return None
     return None
 
-def scrape_google(page, search_key, mode="Barcode"):
+def scrape_google_smart(page, search_key, mode="Tên SP"):
+    """Logic quét toàn trang kết hợp Regex mạnh để bắt giá từ Co.op Online"""
     try:
-        # GIỮ NGUYÊN TÊN SẢN PHẨM: Không cắt bỏ bất kỳ ký tự nào
-        url = f"https://www.google.com/search?q=giá+{search_key.replace(' ', '+')}"
+        # Thay thế các ký tự đặc biệt như * bằng khoảng trắng để Google không bị 'loạn'
+        query = search_key.replace('*', ' ').replace('x', ' ').replace('X', ' ')
+        url = f"https://www.google.com/search?q=giá+{query.replace(' ', '+')}"
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
         
-        # SỬ DỤNG LOGIC QUÉT TOÀN TRANG (innerText) ĐỂ KHÔNG SÓT KẾT QUẢ
-        # Cách này giống hệt logic quet_gia_lotte.py mà Hưng thấy hiệu quả
+        # Lấy toàn bộ text để tránh sót các thẻ HTML lạ của Google
         content = page.evaluate("() => document.body.innerText")
         
-        # Tìm các dòng có chứa giá (số + ₫/đ)
-        lines = [l.strip() for l in content.split('\n') if l.strip()]
+        # REGEX MỚI: Tìm con số có định dạng giá (60.000) đứng cạnh ₫/đ
+        # Ưu tiên bắt các cụm như '60.000 ₫' hoặc '60.000đ'
+        matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', content)
         
-        for i, line in enumerate(lines):
-            if "₫" in line or "đ" in line:
-                price = clean_price(line)
-                # Chỉ lấy giá trong khoảng hợp lý cho sản phẩm lẻ
-                if 1000 < price < 200000:
-                    # Cố gắng lấy link từ kết quả gần đó nhất
+        if matches:
+            for m in matches:
+                price = clean_price(m)
+                # Kiểm tra giá lẻ (thường dưới 100k cho gia vị) để loại bỏ giá thùng
+                if 1000 < price < 150000:
                     return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": url}
-                    
     except: return None
     return None
 
-# --- 3. ĐIỀU PHỐI QUY TRÌNH ---
+# --- 3. ĐIỀU PHỐI ---
 def start_process(name, barcode, gia_niem_yet):
     res = None
     with sync_playwright() as p:
@@ -80,12 +80,12 @@ def start_process(name, barcode, gia_niem_yet):
         # Bước 2: Google Barcode
         if not res:
             st.write("⚠️ Bước 1 không có. Quét Google Barcode...")
-            res = scrape_google(page, barcode, mode="Barcode")
+            res = scrape_google_smart(page, barcode, mode="Barcode")
             
-        # Bước 3: Google Tên SP (Giữ nguyên tên gốc)
+        # Bước 3: Google Tên SP (Xử lý thông minh ký tự đặc biệt)
         if not res:
-            st.write(f"⚠️ Bước 2 không ra. Tìm chính xác tên: {name}...")
-            res = scrape_google(page, name, mode="Tên SP")
+            st.write(f"⚠️ Bước 2 không ra. Đang tìm theo tên: {name}...")
+            res = scrape_google_smart(page, name, mode="Tên SP")
 
         browser.close()
 
@@ -95,8 +95,8 @@ def start_process(name, barcode, gia_niem_yet):
     
     return [res] if res else []
 
-# --- GIAO DIỆN ---
-st.title("🚀 Genshai Price Checker (V28.3 - Nguyên Tên)")
+# --- UI ---
+st.title("🚀 Genshai Price Checker (V28.4 - Google Smart)")
 
 with st.form("main_form"):
     c1, c2, c3 = st.columns(3)
@@ -106,9 +106,9 @@ with st.form("main_form"):
     submitted = st.form_submit_button("KIỂM TRA GIÁ")
 
 if submitted:
-    with st.spinner("Đang tìm kiếm..."):
+    with st.spinner("Đang truy xuất dữ liệu..."):
         data = start_process(name_in, barcode_in, price_in)
         if data:
             st.table(pd.DataFrame(data))
         else:
-            st.error("Vẫn không tìm thấy kết quả. Có thể Google đang hạn chế truy cập tự động.")
+            st.error("Vẫn không tìm thấy. Có thể Google đang chặn hoặc định dạng giá quá lạ.")
