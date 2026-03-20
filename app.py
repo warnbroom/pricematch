@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 
-# --- 1. SETUP HỆ THỐNG ---
+# --- 1. SETUP ---
 @st.cache_resource
 def install_browser():
     try:
@@ -22,69 +22,72 @@ def clean_price(text):
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- 2. LOGIC GỐC TỪ FILE QUET_GIA_LOTTE.PY ---
+# --- 2. LOGIC TÌM KIẾM ---
+
 def scrape_lotte_goc(page, barcode):
     try:
         url = f"https://www.lottemart.vn/vi-nsg/category?q={barcode}"
         page.goto(url, wait_until="networkidle", timeout=20000)
-        time.sleep(2) # Đợi load giá
-        
-        # ĐÂY LÀ LOGIC HƯNG ĐANG DÙNG HIỆU QUẢ
+        time.sleep(2)
         content = page.evaluate("() => document.body.innerText")
-        
-        if "Không tìm thấy sản phẩm" in content:
-            return None
-            
+        if "Không tìm thấy sản phẩm" in content: return None
         if "₫" in content or "đ" in content:
             lines = [l.strip() for l in content.split('\n') if l.strip()]
             for line in lines:
                 if "₫" in line or "đ" in line:
                     price = clean_price(line)
-                    # Loại bỏ mốc lọc 150.000 và các số rác
                     if 1000 < price < 150000: 
-                        return {"Nguồn": "Lotte Mart (Gốc)", "Giá TT": price, "Link": url}
+                        return {"Nguồn": "Lotte Mart", "Giá TT": price, "Link": url}
     except: return None
     return None
 
-# --- 3. LOGIC GỐC TỪ FILE QUET_GIA.PY ---
-def scrape_google_goc(page, search_key, mode):
+def scrape_google_with_log(page, search_key, mode):
+    """Bám sát div.g và in log chi tiết"""
     try:
         url = f"https://www.google.com/search?q=giá+{search_key.replace(' ', '+')}"
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
         
-        # TUÂN THỦ ĐÚNG div.g VÀ inner_text()
+        # Lấy tất cả div.g theo logic gốc của Hưng
         items = page.query_selector_all("div.g")
-        for item in items:
-            text = item.inner_text()
+        
+        log_entries = []
+        log_entries.append(f"<b>[Hệ thống]</b> Đã tìm thấy {len(items)} khối kết quả (div.g)")
+        
+        for i, item in enumerate(items[:5]): # Log 5 kết quả đầu
+            text = item.inner_text().replace('\n', ' ')
+            log_entries.append(f"<b>[Kết quả {i+1}]</b>: {text[:150]}...")
+            
             if "₫" in text or "đ" in text:
                 price = clean_price(text)
                 if 1000 < price < 10000000:
                     link_elem = item.query_selector("a")
                     link = link_elem.get_attribute("href") if link_elem else url
+                    st.session_state.google_logs = log_entries # Lưu log vào session
                     return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
-    except: return None
+        
+        st.session_state.google_logs = log_entries
+    except Exception as e:
+        st.session_state.google_logs = [f"Lỗi: {str(e)}"]
     return None
 
-# --- 4. ĐIỀU PHỐI 3 BƯỚC ---
+# --- 3. ĐIỀU PHỐI ---
 def start_process(name, barcode, gia_niem_yet):
+    if 'google_logs' not in st.session_state:
+        st.session_state.google_logs = []
+        
     res = None
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
 
-        # BƯỚC 1: Lotte (Dùng quet_gia_lotte.py)
-        st.write("🔍 Bước 1: Quét Lotte Mart (Logic Gốc)...")
+        # Bước 1 & 2
         res = scrape_lotte_goc(page, barcode)
-        
-        # BƯỚC 2: Google Barcode (Dùng quet_gia.py)
         if not res:
-            st.write("⚠️ Bước 1 không ra. Quét Google Barcode...")
-            res = scrape_google_goc(page, barcode, "Barcode")
+            res = scrape_google_with_log(page, barcode, "Barcode")
             
-        # BƯỚC 3: Google Tên sản phẩm (Dùng quet_gia.py)
+        # Bước 3: Tìm theo tên
         if not res:
-            st.write(f"⚠️ Bước 2 không ra. Quét Google Tên SP: {name}...")
-            res = scrape_google_goc(page, name, "Tên SP")
+            res = scrape_google_with_log(page, name, "Tên SP")
 
         browser.close()
 
@@ -95,7 +98,7 @@ def start_process(name, barcode, gia_niem_yet):
     return [res] if res else []
 
 # --- GIAO DIỆN ---
-st.title("🚀 Genshai Price Checker (V28.7 - Combo Gốc)")
+st.title("🚀 Genshai Checker V28.8 - Debug Mode")
 
 with st.form("main_form"):
     c1, c2, c3 = st.columns(3)
@@ -105,10 +108,21 @@ with st.form("main_form"):
     submitted = st.form_submit_button("KIỂM TRA")
 
 if submitted:
-    with st.spinner("Đang chạy quy trình 3 bước chuẩn..."):
+    # Reset log
+    st.session_state.google_logs = []
+    
+    with st.spinner("Đang truy xuất dữ liệu..."):
         data = start_process(name_in, barcode_in, price_in)
+        
+        # Hiển thị Log Debug
+        with st.expander("🛠 XEM LOG XỬ LÝ DỮ LIỆU GOOGLE", expanded=True):
+            if st.session_state.google_logs:
+                for log in st.session_state.google_logs:
+                    st.markdown(log, unsafe_allow_html=True)
+            else:
+                st.write("Không có dữ liệu log.")
+
         if data:
-            st.success("Đã lấy được dữ liệu!")
             st.table(pd.DataFrame(data))
         else:
-            st.error("Không tìm thấy kết quả.")
+            st.error("Không tìm thấy giá trong các khối div.g.")
