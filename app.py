@@ -71,4 +71,32 @@ def scrape_direct_retailers(page, product_name, gia_genshai):
 # --- 3. ĐIỀU PHỐI ---
 def start_process(name, price_niemyet):
     with sync_playwright() as p:
-        browser = p.
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        page = context.new_page()
+
+        data = scrape_direct_retailers(page, name, price_niemyet)
+        browser.close()
+
+    if data:
+        for res in data:
+            diff = res['Giá TT'] - price_niemyet
+            res['Chênh lệch (%)'] = f"{(diff / price_niemyet * 100):+.1f}%"
+        return data
+    return []
+
+# --- UI ---
+st.title("🚀 Genshai Direct Retailer V33.0")
+
+with st.form("direct_form"):
+    name_in = st.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
+    price_in = st.number_input("Giá Genshai", value=81400)
+    submitted = st.form_submit_button("QUÉT TRỰC TIẾP 4 SIÊU THỊ")
+
+if submitted:
+    with st.spinner("Đang truy cập trực tiếp các hệ thống bán lẻ..."):
+        results = start_process(name_in, price_in)
+        if results:
+            st.table(pd.DataFrame(results))
+        else:
+            st.error("Không tìm thấy giá trong khoảng chấp nhận được. Có thể sản phẩm đã hết hàng hoặc tên tìm kiếm không khớp.")
