@@ -4,9 +4,8 @@ from playwright.sync_api import sync_playwright
 import re
 import subprocess
 import time
-import urllib.parse
 
-# --- 1. SETUP ---
+# --- 1. SETUP HỆ THỐNG ---
 @st.cache_resource
 def install_browser():
     try:
@@ -15,88 +14,102 @@ def install_browser():
 
 install_browser()
 
-st.set_page_config(page_title="Genshai Direct Search V33.0", layout="wide")
+st.set_page_config(page_title="Genshai Google Pro V31.1", layout="wide")
 
 def clean_price(text):
     if not text: return 0
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- 2. LOGIC TRUY CẬP TRỰC TIẾP ---
+# --- 2. LOGIC GOOGLE NÂNG CAO ---
 
-def scrape_direct_retailers(page, product_name, gia_genshai):
-    # Định dạng URL tìm kiếm dựa trên thông tin Hưng cung cấp
-    encoded_name = urllib.parse.quote(product_name)
-    sites = [
-        {"name": "Bách Hóa Xanh", "url": f"https://www.bachhoaxanh.com/tim-kiem?key={encoded_name}"},
-        {"name": "Co.op Online", "url": f"https://cooponline.vn/search?router=productListing&query={encoded_name}"},
-        {"name": "Kingfoodmart", "url": f"https://kingfoodmart.com/search?keyword={encoded_name}"},
-        {"name": "AeonEshop", "url": f"https://aeoneshop.com/products/search/{encoded_name}"}
-    ]
-    
-    results = []
-    
-    for site in sites:
-        try:
-            st.write(f"🔄 Đang kiểm tra: {site['name']}...")
-            page.goto(site['url'], wait_until="networkidle", timeout=20000)
-            time.sleep(3) # Chờ trang load sản phẩm
+def scrape_google_stealth(page, search_key, mode):
+    """
+    Sử dụng Selector đa điểm và quét văn bản sâu để bắt được giá Co.op/Lotte 
+    ngay cả khi div.g bị ẩn.
+    """
+    try:
+        # Sử dụng URL tìm kiếm có tham số hl=vi để ưu tiên kết quả Việt Nam
+        url = f"https://www.google.com/search?q=giá+bán+{search_key.replace(' ', '+')}&hl=vi"
+        page.goto(url, wait_until="networkidle", timeout=25000)
+        time.sleep(3) # Chờ Google render Rich Snippets (giá hiển thị trực tiếp)
+        
+        # Thử nhiều loại Selector khác nhau vì Google thường đổi class trên Cloud
+        selectors = ["div.g", ".tF2Cxc", ".v7W49e", "div[data-hveid]"]
+        
+        for selector in selectors:
+            items = page.query_selector_all(selector)
+            if items:
+                for item in items:
+                    text = item.inner_text()
+                    if "₫" in text or "đ" in text:
+                        price = clean_price(text)
+                        # Bộ lọc giá lẻ gia vị/đồ dùng (10k - 200k)
+                        if 10000 < price < 200000:
+                            link_elem = item.query_selector("a")
+                            link = link_elem.get_attribute("href") if link_elem else url
+                            return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
 
-            # Quét toàn bộ văn bản trang để tìm giá (Text Scan) vì mỗi trang có class khác nhau
-            content = page.evaluate("() => document.body.innerText")
-            
-            # Tìm tất cả các cụm số có ký hiệu đ hoặc ₫
-            price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', content)
-            
-            valid_prices = []
+        # PHƯƠNG ÁN CUỐI: Quét văn bản toàn trang nếu các Selector đều thất bại
+        full_text = page.evaluate("() => document.body.innerText")
+        # Regex tìm các cụm: số + khoảng trắng (tùy chọn) + đ/₫
+        price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', full_text)
+        if price_matches:
             for match in price_matches:
                 p = clean_price(match)
-                # Filter thông minh dựa trên giá Genshai
-                if gia_genshai * 0.3 < p < gia_genshai * 2.5:
-                    valid_prices.append(p)
-            
-            if valid_prices:
-                # Chọn giá xuất hiện nhiều nhất hoặc nhỏ nhất (thường là giá lẻ)
-                best_price = min(valid_prices)
-                results.append({
-                    "Nguồn": site['name'],
-                    "Giá TT": best_price,
-                    "Link": site['url']
-                })
-        except Exception as e:
-            continue
-            
-    return results
+                if 10000 < p < 200000:
+                    return {"Nguồn": f"Google ({mode} - Text Scan)", "Giá TT": p, "Link": url}
+                    
+    except Exception: return None
+    return None
 
 # --- 3. ĐIỀU PHỐI ---
-def start_process(name, price_niemyet):
+def start_process(name, barcode, gia_niem_yet):
+    final_res = None
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        # Cấu hình Stealth mạnh mẽ để tránh bị Google chặn 0 khối
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox", 
+            "--disable-blink-features=AutomationControlled"
+        ])
+        # Giả lập thiết bị thật với độ phân giải cao
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
 
-        data = scrape_direct_retailers(page, name, price_niemyet)
+        # BƯỚC 1: Tìm theo Barcode (Ưu tiên tuyệt đối)
+        st.write(f"🔍 Đang tìm Barcode {barcode}...")
+        final_res = scrape_google_stealth(page, barcode, "Barcode")
+        
+        # BƯỚC 2: Tìm theo Tên SP (Nếu bước 1 không ra)
+        if not final_res:
+            st.write(f"⚠️ Đang tìm theo Tên: {name}...")
+            final_res = scrape_google_stealth(page, name, "Tên SP")
+
         browser.close()
 
-    if data:
-        for res in data:
-            diff = res['Giá TT'] - price_niemyet
-            res['Chênh lệch (%)'] = f"{(diff / price_niemyet * 100):+.1f}%"
-        return data
-    return []
+    if final_res and gia_niem_yet > 0:
+        diff = final_res['Giá TT'] - gia_niem_yet
+        final_res['Chênh lệch (%)'] = f"{(diff / gia_niem_yet * 100):+.1f}%"
+    
+    return [final_res] if final_res else []
 
 # --- UI ---
-st.title("🚀 Genshai Direct Retailer V33.0")
+st.title("🚀 Genshai Google Pro V31.1")
 
-with st.form("direct_form"):
-    name_in = st.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
-    price_in = st.number_input("Giá Genshai", value=81400)
-    submitted = st.form_submit_button("QUÉT TRỰC TIẾP 4 SIÊU THỊ")
+with st.form("main_form"):
+    c1, c2, c3 = st.columns(3)
+    barcode_in = c1.text_input("Mã Barcode", value="8851130050753")
+    name_in = c2.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
+    price_in = c3.number_input("Giá niêm yết (Genshai)", value=81400)
+    submitted = st.form_submit_button("KIỂM TRA GOOGLE")
 
 if submitted:
-    with st.spinner("Đang truy cập trực tiếp các hệ thống bán lẻ..."):
-        results = start_process(name_in, price_in)
-        if results:
-            st.table(pd.DataFrame(results))
+    with st.spinner("Đang thực hiện quét Google bằng công nghệ Stealth..."):
+        data = start_process(name_in, barcode_in, price_in)
+        if data:
+            st.table(pd.DataFrame(data))
         else:
-            st.error("Không tìm thấy giá trong khoảng chấp nhận được. Có thể sản phẩm đã hết hàng hoặc tên tìm kiếm không khớp.")
+            st.error("Google vẫn đang chặn truy cập hoặc không tìm thấy khối div.g. Hãy thử lại sau vài phút.")
