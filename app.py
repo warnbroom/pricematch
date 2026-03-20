@@ -27,50 +27,54 @@ def sanitize_name(name):
     clean = re.sub(r'[\*xX\(\)\[\]]', ' ', name)
     return " ".join(clean.split())
 
-# --- 2. LOGIC QUÉT LOTTE (CHIẾN THUẬT TÀNG HÌNH) ---
+# --- 2. LOGIC QUÉT LOTTE (CÓ CHỌN KHU VỰC) ---
 
 def scrape_lotte(page, barcode):
     try:
-        # Lotte đôi khi cần tìm chính xác chuỗi barcode
-        url = f"https://www.lottemart.vn/vi-nsg/category?q={barcode}"
+        # Bước A: Vào trang chủ để xác nhận khu vực trước
+        page.goto("https://www.lottemart.vn/", wait_until="networkidle", timeout=30000)
         
-        # Truy cập với timeout dài hơn
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        
-        # GIẢ LẬP NGƯỜI DÙNG: Cuộn trang nhẹ để kích hoạt load giá
-        page.mouse.wheel(0, 500)
-        time.sleep(2) # Chờ 2 giây để script của Lotte chạy
-        
-        # Chờ đợi một trong hai: Giá tiền xuất hiện HOẶC thông báo không thấy
+        # Thử đóng popup nếu có
         try:
-            page.wait_for_selector(".product-item .price, text=₫", timeout=8000)
-        except:
-            if "Không tìm thấy sản phẩm" in page.content():
-                return None
+            page.click(".close-popup", timeout=3000)
+        except: pass
 
-        # Bóc tách dữ liệu từ sản phẩm đầu tiên
-        product = page.query_selector(".product-item")
-        if product:
-            price_elem = product.query_selector(".price, .product-price")
-            if price_elem:
-                price_text = price_elem.inner_text()
-                return {
-                    "Nguồn": "Lotte Mart (Barcode)", 
-                    "Giá TT": clean_price(price_text), 
-                    "Link": url
-                }
+        # Bước B: Tìm mã barcode
+        url = f"https://www.lottemart.vn/vi-nsg/category?q={barcode}"
+        page.goto(url, wait_until="networkidle", timeout=30000)
+        
+        # Bước C: Cuộn trang để kích hoạt Lazy Load
+        page.evaluate("window.scrollTo(0, 500)")
+        time.sleep(3) 
+
+        # Kiểm tra nội dung trang
+        content = page.content()
+        if "Không tìm thấy sản phẩm" in content:
+            return None
+
+        # Bước D: Bóc tách giá từ thẻ sản phẩm chuẩn
+        # Nhắm vào class .price-amount hoặc .product-price-view
+        product_item = page.query_selector(".product-item, .item-inner")
+        if product_item:
+            # Lấy text chứa ký hiệu ₫
+            price_text = product_item.inner_text()
+            if "₫" in price_text or "đ" in price_text:
+                # Trích xuất con số trước chữ ₫
+                price_val = clean_price(price_text.split("₫")[0])
+                if price_val > 1000:
+                    return {"Nguồn": "Lotte Mart (Barcode)", "Giá TT": price_val, "Link": url}
     except Exception as e:
-        st.warning(f"Lotte chưa phản hồi (Thử lại bước 2-3)...")
+        print(f"Lotte Debug: {e}")
         return None
     return None
 
 def scrape_google(page, search_key, mode="Barcode"):
+    """Logic tìm kiếm Google dự phòng"""
     try:
         query = sanitize_name(search_key) if mode == "Tên SP" else search_key
         url = f"https://www.google.com/search?q=giá+{query.replace(' ', '+')}"
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
         
-        # Tìm giá từ kết quả tìm kiếm Google
         results = page.query_selector_all("div.g, div[data-hveid]")
         for item in results:
             text = item.inner_text()
@@ -83,35 +87,29 @@ def scrape_google(page, search_key, mode="Barcode"):
     except: return None
     return None
 
-# --- 3. ĐIỀU PHỐI (VỚI CẤU HÌNH TÀNG HÌNH) ---
+# --- 3. ĐIỀU PHỐI 3 BƯỚC ---
 def start_process(name, barcode, gia_niem_yet):
     res = None
     with sync_playwright() as p:
-        # Launch với các tham số ẩn danh chuyên sâu
-        browser = p.chromium.launch(headless=True, args=[
-            "--no-sandbox", 
-            "--disable-blink-features=AutomationControlled", # Ẩn dấu hiệu robot
-            "--disable-infobars"
-        ])
-        
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1366, 'height': 768}
         )
         page = context.new_page()
 
-        # BƯỚC 1: LOTTE BARCODE
-        st.write(f"🔍 Đang thử vượt rào Lotte Mart cho mã {barcode}...")
+        # BƯỚC 1: LOTTE
+        st.write(f"🔍 Bước 1: Đang thâm nhập Lotte Mart (Mã {barcode})...")
         res = scrape_lotte(page, barcode)
         
         # BƯỚC 2: GOOGLE BARCODE
         if not res:
-            st.write("⚠️ Lotte chặn hoặc không thấy. Đang tìm Google Barcode...")
+            st.write("⚠️ Bước 1 không có giá. Đang thử Google Barcode...")
             res = scrape_google(page, barcode, mode="Barcode")
             
         # BƯỚC 3: GOOGLE TÊN SP
         if not res:
-            st.write(f"⚠️ Đang tìm Google theo tên: {sanitize_name(name)}...")
+            st.write(f"⚠️ Bước 2 không ra. Đang tìm tên: {sanitize_name(name)}...")
             res = scrape_google(page, name, mode="Tên SP")
 
         browser.close()
@@ -123,7 +121,7 @@ def start_process(name, barcode, gia_niem_yet):
     return [res] if res else []
 
 # --- UI ---
-st.title("🚀 Hệ Thống So Sánh Giá Genshai (V27.4)")
+st.title("🚀 Hệ Thống So Sánh Giá Genshai (V27.5)")
 
 with st.form("main_form"):
     c1, c2, c3 = st.columns(3)
@@ -133,9 +131,9 @@ with st.form("main_form"):
     submitted = st.form_submit_button("KIỂM TRA NGAY")
 
 if submitted:
-    with st.spinner("Đang chạy quy trình tàng hình 3 bước..."):
+    with st.spinner("Đang thực hiện quy trình 3 bước (Lotte sẽ cần thời gian tải trang)..."):
         data = start_process(name_in, barcode_in, price_in)
         if data:
             st.table(pd.DataFrame(data))
         else:
-            st.error("Cả 3 bước đều thất bại. Có thể website đối thủ đã thay đổi cấu trúc hoàn toàn.")
+            st.error("Dù đã cố gắng nhưng Lotte Mart vẫn không trả về dữ liệu. Hưng hãy thử lại vào lúc khác hoặc kiểm tra xem website Lotte có đang bảo trì không nhé.")
