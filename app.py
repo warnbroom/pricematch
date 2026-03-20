@@ -4,14 +4,14 @@ from playwright.sync_api import sync_playwright
 import re
 import os
 import subprocess
+import time
 
-# --- SETUP HỆ THỐNG CHO STREAMLIT CLOUD ---
+# --- 1. SETUP HỆ THỐNG ---
 @st.cache_resource
 def install_browser():
     try:
         subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception:
-        pass
+    except Exception: pass
 
 install_browser()
 
@@ -19,41 +19,46 @@ st.set_page_config(page_title="Genshai Price Checker", layout="wide")
 
 def clean_price(text):
     if not text: return 0
+    # Xử lý các định dạng như 62.900đ hoặc 62,900
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- BƯỚC 1: LOGIC TỪ FILE QUET_GIA_LOTTE.PY CỦA HƯNG ---
+# --- 2. LOGIC QUÉT LOTTE (FIX LẤY NHẦM GIÁ BỘ LỌC) ---
 def scrape_lotte(page, barcode):
     try:
         url = f"https://www.lottemart.vn/vi-nsg/category?q={barcode}"
         page.goto(url, wait_until="networkidle", timeout=20000)
         
-        # SỬ DỤNG ĐÚNG LOGIC CỦA HƯNG
-        content = page.evaluate("() => document.body.innerText")
+        # Chờ 2 giây để chắc chắn giá đã load xong
+        time.sleep(2)
+
+        # CẢI TIẾN: Chỉ lấy text trong vùng chứa sản phẩm, bỏ qua cột bộ lọc bên trái
+        # Selector '.product-list' hoặc '.category-view' giúp loại bỏ con số 150.000 ở bộ lọc
+        content = page.evaluate("""() => {
+            const productArea = document.querySelector('.product-list, .category-view, #search-result');
+            return productArea ? productArea.innerText : document.body.innerText;
+        }""")
         
-        # Kiểm tra nếu trang báo không tìm thấy (để tránh lấy nhầm giá gợi ý)
         if "Không tìm thấy sản phẩm" in content:
             return None
             
         if "₫" in content or "đ" in content:
-            # Tách dòng và tìm dòng chứa giá như code gốc của Hưng
+            # Tách các dòng và tìm dòng có chứa giá sản phẩm
             lines = [l.strip() for l in content.split('\n') if l.strip()]
             for line in lines:
-                if "₫" in line or "đ" in line:
+                # Nếu dòng chứa '₫' và có số, khả năng cao là giá SP thực tế
+                if ("₫" in line or "đ" in line) and any(char.isdigit() for char in line):
                     price = clean_price(line)
+                    # Loại bỏ các con số rác quá nhỏ hoặc quá lớn
                     if 1000 < price < 10000000:
-                        return {"Nguồn": "Lotte Mart (Gốc)", "Giá TT": price, "Link": url}
-    except:
-        return None
+                        return {"Nguồn": "Lotte Mart (Chính xác)", "Giá TT": price, "Link": url}
+    except: return None
     return None
 
-# --- BƯỚC 2 & 3: LOGIC GOOGLE (QUET_GIA.PY) ---
 def scrape_google(page, search_key, mode="Barcode"):
     try:
         url = f"https://www.google.com/search?q=giá+{search_key.replace(' ', '+')}"
         page.goto(url, wait_until="domcontentloaded", timeout=15000)
-        
-        # Quét div.g như logic quet_gia.py
         items = page.query_selector_all("div.g")
         for item in items[:3]:
             text = item.inner_text()
@@ -62,30 +67,25 @@ def scrape_google(page, search_key, mode="Barcode"):
                 if 1000 < price < 10000000:
                     link = item.query_selector("a").get_attribute("href") if item.query_selector("a") else url
                     return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
-    except:
-        return None
+    except: return None
     return None
 
-# --- ĐIỀU PHỐI 3 BƯỚC ---
+# --- 3. ĐIỀU PHỐI ---
 def start_process(name, barcode, gia_niem_yet):
     res = None
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/121.0.0.0 Safari/537.36")
 
-        # 1. Lotte Barcode (Dùng code Hưng)
-        st.write("🔍 Đang chạy logic Lotte gốc...")
+        # Bước 1: Lotte (Dùng logic khoanh vùng mới)
+        st.write("🔍 Đang bóc tách giá từ vùng sản phẩm Lotte...")
         res = scrape_lotte(page, barcode)
         
-        # 2. Google Barcode
+        # Bước 2 & 3 dự phòng
         if not res:
-            st.write("⚠️ Lotte không ra, tìm Google Barcode...")
             res = scrape_google(page, barcode, mode="Barcode")
-            
-        # 3. Google Tên SP (Tối ưu dấu * để ra Co.op Online)
         if not res:
             clean_name = re.sub(r'[\*xX\(\)\[\]]', ' ', name)
-            st.write(f"⚠️ Đang tìm Google theo tên: {clean_name}...")
             res = scrape_google(page, clean_name, mode="Tên SP")
 
         browser.close()
@@ -96,18 +96,18 @@ def start_process(name, barcode, gia_niem_yet):
     
     return [res] if res else []
 
-# --- GIAO DIỆN ---
-st.title("🚀 Genshai Price Checker (V27.7 - Logic Gốc)")
+# --- UI ---
+st.title("🚀 Genshai Price Checker (V27.8 - Fix Giá)")
 
 with st.form("search_form"):
     c1, c2, c3 = st.columns(3)
     barcode_in = c1.text_input("Mã Barcode", value="0078895153767")
     name_in = c2.text_input("Tên sản phẩm", value="Hắc xì dầu thượng hạng LKK 500ml*12")
     price_in = c3.number_input("Giá niêm yết", value=66800)
-    submitted = st.form_submit_button("KIỂM TRA GIÁ")
+    submitted = st.form_submit_button("KIỂM TRA LẠI")
 
 if submitted:
-    with st.spinner("Đang chạy..."):
+    with st.spinner("Đang quét..."):
         data = start_process(name_in, barcode_in, price_in)
         if data:
             st.table(pd.DataFrame(data))
