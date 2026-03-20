@@ -14,86 +14,78 @@ def install_browser():
 
 install_browser()
 
-st.set_page_config(page_title="Genshai Google Checker V31.0", layout="wide")
+st.set_page_config(page_title="Genshai Google Pro V31.1", layout="wide")
 
 def clean_price(text):
     if not text: return 0
-    # Xử lý các định dạng như 60.000đ, 60,000...
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- 2. LOGIC TÌM KIẾM GOOGLE (QUET_GIA.PY) ---
+# --- 2. LOGIC GOOGLE NÂNG CAO ---
 
-def scrape_google_logic_chuan(page, search_key, mode):
-    """Bám sát logic div.g và bóc tách dữ liệu từ file quet_gia.py"""
+def scrape_google_stealth(page, search_key, mode):
+    """
+    Sử dụng Selector đa điểm và quét văn bản sâu để bắt được giá Co.op/Lotte 
+    ngay cả khi div.g bị ẩn.
+    """
     try:
-        url = f"https://www.google.com/search?q=giá+{search_key.replace(' ', '+')}"
-        page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        time.sleep(2) # Chờ kết quả hiển thị ổn định
+        # Sử dụng URL tìm kiếm có tham số hl=vi để ưu tiên kết quả Việt Nam
+        url = f"https://www.google.com/search?q=giá+bán+{search_key.replace(' ', '+')}&hl=vi"
+        page.goto(url, wait_until="networkidle", timeout=25000)
+        time.sleep(3) # Chờ Google render Rich Snippets (giá hiển thị trực tiếp)
         
-        # Selector div.g là cốt lõi của quet_gia.py
-        items = page.query_selector_all("div.g")
+        # Thử nhiều loại Selector khác nhau vì Google thường đổi class trên Cloud
+        selectors = ["div.g", ".tF2Cxc", ".v7W49e", "div[data-hveid]"]
         
-        for item in items:
-            text = item.inner_text()
-            # Kiểm tra sự tồn tại của ký hiệu tiền tệ
-            if "₫" in text or "đ" in text:
-                price = clean_price(text)
-                
-                # BỘ LỌC GIÁ LẺ (Tránh lấy nhầm giá combo/thùng)
-                # Dựa trên dữ liệu Hưng cung cấp, giá lẻ thường < 120.000
-                if 10000 < price < 120000:
-                    link_elem = item.query_selector("a")
-                    link = link_elem.get_attribute("href") if link_elem else url
-                    return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
-    except Exception as e:
-        return None
+        for selector in selectors:
+            items = page.query_selector_all(selector)
+            if items:
+                for item in items:
+                    text = item.inner_text()
+                    if "₫" in text or "đ" in text:
+                        price = clean_price(text)
+                        # Bộ lọc giá lẻ gia vị/đồ dùng (10k - 200k)
+                        if 10000 < price < 200000:
+                            link_elem = item.query_selector("a")
+                            link = link_elem.get_attribute("href") if link_elem else url
+                            return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
+
+        # PHƯƠNG ÁN CUỐI: Quét văn bản toàn trang nếu các Selector đều thất bại
+        full_text = page.evaluate("() => document.body.innerText")
+        # Regex tìm các cụm: số + khoảng trắng (tùy chọn) + đ/₫
+        price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', full_text)
+        if price_matches:
+            for match in price_matches:
+                p = clean_price(match)
+                if 10000 < p < 200000:
+                    return {"Nguồn": f"Google ({mode} - Text Scan)", "Giá TT": p, "Link": url}
+                    
+    except Exception: return None
     return None
 
-# --- 3. ĐIỀU PHỐI QUY TRÌNH ---
+# --- 3. ĐIỀU PHỐI ---
 def start_process(name, barcode, gia_niem_yet):
     final_res = None
     with sync_playwright() as p:
-        # Sử dụng các tham số giúp tránh bị Google chặn (Stealth)
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        # Cấu hình Stealth mạnh mẽ để tránh bị Google chặn 0 khối
+        browser = p.chromium.launch(headless=True, args=[
+            "--no-sandbox", 
+            "--disable-blink-features=AutomationControlled"
+        ])
+        # Giả lập thiết bị thật với độ phân giải cao
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={'width': 1920, 'height': 1080}
+        )
         page = context.new_page()
 
-        # BƯỚC 1: Tìm Barcode trên Google
-        st.write(f"🔍 Bước 1: Đang tìm Barcode ({barcode}) trên Google...")
-        final_res = scrape_google_logic_chuan(page, barcode, "Barcode")
+        # BƯỚC 1: Tìm theo Barcode (Ưu tiên tuyệt đối)
+        st.write(f"🔍 Đang tìm Barcode {barcode}...")
+        final_res = scrape_google_stealth(page, barcode, "Barcode")
         
-        # BƯỚC 2: Nếu Bước 1 thất bại, tìm theo Tên trên Google
+        # BƯỚC 2: Tìm theo Tên SP (Nếu bước 1 không ra)
         if not final_res:
-            st.write(f"⚠️ Không thấy Barcode. Bước 2: Tìm theo Tên trên Google...")
-            # Giữ nguyên tên đầy đủ theo yêu cầu của Hưng
-            final_res = scrape_google_logic_chuan(page, name, "Tên SP")
+            st.write(f"⚠️ Đang tìm theo Tên: {name}...")
+            final_res = scrape_google_stealth(page, name, "Tên SP")
 
         browser.close()
-
-    if final_res and gia_niem_yet > 0:
-        diff = final_res['Giá TT'] - gia_niem_yet
-        final_res['Chênh lệch (%)'] = f"{(diff / gia_niem_yet * 100):+.1f}%"
-    
-    return [final_res] if final_res else []
-
-# --- GIAO DIỆN ---
-st.title("🚀 Genshai Google Checker V31.0")
-st.info("Hệ thống tập trung tối ưu logic tìm kiếm Google Search.")
-
-with st.form("google_form"):
-    c1, c2, c3 = st.columns(3)
-    barcode_in = c1.text_input("Mã Barcode", value="078895153767")
-    name_in = c2.text_input("Tên sản phẩm", value="Hắc xì dầu thượng hạng LKK 500ml*12")
-    price_in = c3.number_input("Giá niêm yết (Genshai)", value=66800)
-    submitted = st.form_submit_button("KIỂM TRA GOOGLE")
-
-if submitted:
-    with st.spinner("Đang thực hiện quy trình tìm kiếm 2 giai đoạn..."):
-        data = start_process(name_in, barcode_in, price_in)
-        if data:
-            st.success("Đã tìm thấy giá!")
-            st.table(pd.DataFrame(data))
-        else:
-            # Thông báo khi Google chặn hoặc không tìm thấy khối div.g phù hợp
-            st.error("Không tìm thấy kết quả phù hợp trong khối div.g trên Google.")
