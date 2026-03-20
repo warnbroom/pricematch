@@ -100,4 +100,27 @@ def start_process(name, barcode, price_niemyet, use_proxy):
 st.title("🚀 Genshai Proxy Checker V34.4")
 
 with st.sidebar:
-    st.header("Cài
+    st.header("Cài đặt kết nối")
+    use_p = st.toggle("Sử dụng Proxy dân cư", value=False)
+    st.info("Bật Proxy để tránh lỗi reCAPTCHA khi có nhiều người dùng cùng quét.")
+
+with st.form("main_form"):
+    c1, c2, c3 = st.columns([1, 2, 1])
+    barcode_in = c1.text_input("Mã Barcode", value="8851130050753")
+    name_in = c2.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
+    price_in = c3.number_input("Giá Genshai", value=81400)
+    submitted = st.form_submit_button("KIỂM TRA HỆ THỐNG")
+
+if submitted:
+    res, ss = start_process(name_in, barcode_in, price_in, use_p)
+    
+    if ss:
+        with st.expander("📷 KIỂM TRA TRẠNG THÁI GOOGLE", expanded=True):
+            st.image(ss)
+            
+    if res:
+        diff = res['Giá TT'] - price_in
+        res['Chênh lệch (%)'] = f"{(diff / price_in * 100):+.1f}%"
+        st.table(pd.DataFrame([res]))
+    else:
+        st.error("Không tìm thấy kết quả phù hợp. Kiểm tra lại ảnh chụp màn hình để xem có bị Captcha không.")
