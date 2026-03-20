@@ -89,3 +89,27 @@ def start_process(name, barcode, gia_niem_yet):
             final_res = scrape_google_stealth(page, name, "Tên SP")
 
         browser.close()
+
+    if final_res and gia_niem_yet > 0:
+        diff = final_res['Giá TT'] - gia_niem_yet
+        final_res['Chênh lệch (%)'] = f"{(diff / gia_niem_yet * 100):+.1f}%"
+    
+    return [final_res] if final_res else []
+
+# --- UI ---
+st.title("🚀 Genshai Google Pro V31.1")
+
+with st.form("main_form"):
+    c1, c2, c3 = st.columns(3)
+    barcode_in = c1.text_input("Mã Barcode", value="8851130050753")
+    name_in = c2.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
+    price_in = c3.number_input("Giá niêm yết (Genshai)", value=81400)
+    submitted = st.form_submit_button("KIỂM TRA GOOGLE")
+
+if submitted:
+    with st.spinner("Đang thực hiện quét Google bằng công nghệ Stealth..."):
+        data = start_process(name_in, barcode_in, price_in)
+        if data:
+            st.table(pd.DataFrame(data))
+        else:
+            st.error("Google vẫn đang chặn truy cập hoặc không tìm thấy khối div.g. Hãy thử lại sau vài phút.")
