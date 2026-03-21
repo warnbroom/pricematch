@@ -1,94 +1,93 @@
 import streamlit as st
 import pandas as pd
-from playwright.sync_api import sync_playwright
+import requests
 import re
-import time
-import io
 
-st.set_page_config(page_title="Genshai Visual Pro V37.4", layout="wide")
+st.set_page_config(page_title="Genshai API Pro V38.0", layout="wide")
 
-# --- QUẢN LÝ KẾT NỐI ---
-SBR_WS_ENDPOINT = st.sidebar.text_input("Browserless Token", value="2UBSKVhZ0O0zDyk4407ed0", type="password")
+# --- CẤU HÌNH GOOGLE API ---
+# Hưng dán 2 mã vừa lấy vào đây hoặc nhập ở Sidebar
+API_KEY = st.sidebar.text_input("AIzaSyB8smn4fvYfs39EUznKtrVIoq33eUfrbxo", type="password")
+SEARCH_ENGINE_ID = st.sidebar.text_input("<script async src="https://cse.google.com/cse.js?cx=61025d0bba9a249bf">
+</script>
+<div class="gcse-search"></div>")
 
 def clean_price(text):
     if not text: return 0
+    # Xử lý cả định dạng giá trong snippet (VD: 81.400đ, Giá: 85.000...)
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-def scrape_with_screenshot(page, query, gia_genshai):
+def get_price_from_api(query, gia_genshai):
     """
-    Quét giá kèm theo chụp ảnh màn hình để debug.
+    Sử dụng Google Custom Search API để lấy kết quả.
     """
-    screenshot_data = None
-    result_data = None
-    
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "key": API_KEY,
+        "cx": SEARCH_ENGINE_ID,
+        "q": f"giá bán {query}",
+        "gl": "vn", # Giới hạn kết quả tại Việt Nam
+        "hl": "vi"  # Ngôn ngữ tiếng Việt
+    }
+
     try:
-        url = f"https://www.google.com/search?q=giá+bán+{query.replace(' ', '+')}&hl=vi&gl=vn"
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        time.sleep(5) # Chờ render nội dung
-
-        # CHỤP ẢNH MÀN HÌNH NGAY LẬP TỨC
-        screenshot_data = page.screenshot(full_page=False)
-
-        # Logic quét giá
-        content = page.evaluate("() => document.body.innerText")
-        price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', content)
+        response = requests.get(url, params=params)
+        data = response.json()
         
+        if "items" not in data:
+            return None
+
         valid_prices = []
-        for m in price_matches:
-            p = clean_price(m)
-            if gia_genshai * 0.5 < p < gia_genshai * 1.5:
-                valid_prices.append(p)
+        for item in data["items"]:
+            # API trả về Tiêu đề và Đoạn mô tả (Snippet)
+            text_to_scan = item.get("title", "") + " " + item.get("snippet", "")
+            
+            # Tìm giá tiền trong văn bản
+            price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', text_to_scan)
+            
+            for m in price_matches:
+                p = clean_price(m)
+                # Lọc giá theo ngưỡng Genshai
+                if gia_genshai * 0.5 < p < gia_genshai * 1.5:
+                    valid_prices.append({"Giá TT": p, "Nguồn": item.get("displayLink"), "Link": item.get("link")})
         
         if valid_prices:
-            best_price = min(valid_prices, key=lambda x: abs(x - gia_genshai))
-            result_data = {"Nguồn": "Google", "Giá TT": best_price, "Link": url}
-            
+            # Chọn kết quả có giá sát với Genshai nhất
+            best_match = min(valid_prices, key=lambda x: abs(x["Giá TT"] - gia_genshai))
+            return best_match
+
     except Exception as e:
-        st.error(f"Lỗi khi quét: {e}")
-        
-    return result_data, screenshot_data
+        st.error(f"Lỗi kết nối API: {e}")
+    return None
 
 # --- GIAO DIỆN ---
-st.title("🚀 Genshai Visual Pro V37.4")
+st.title("🚀 Genshai API Pro V38.0")
+st.info("Hệ thống sử dụng Google API chính chủ - Không Captcha, không lỗi trình duyệt.")
 
-with st.form("visual_form"):
+with st.form("api_form"):
     c1, c2, c3 = st.columns([1, 2, 1])
     barcode_in = c1.text_input("Barcode", value="8851130050753")
     name_in = c2.text_input("Tên SP", value="Kiwi - Dao Bào Vỏ 217")
     price_in = c3.number_input("Giá Genshai", value=81400)
-    submitted = st.form_submit_button("KIỂM TRA & CHỤP ẢNH")
+    submitted = st.form_submit_button("TRA CỨU NGAY")
 
 if submitted:
-    if not SBR_WS_ENDPOINT:
-        st.error("Vui lòng nhập Token Browserless.")
+    if not API_KEY or not SEARCH_ENGINE_ID:
+        st.error("Hưng cần nhập đủ API Key và Search Engine ID ở Sidebar.")
     else:
-        with sync_playwright() as p:
-            try:
-                with st.spinner("🔗 Đang kết nối trình duyệt đám mây..."):
-                    endpoint = f"wss://chrome.browserless.io?token={SBR_WS_ENDPOINT.strip()}"
-                    browser = p.chromium.connect_over_cdp(endpoint)
-                    page = browser.new_context().new_page()
+        with st.spinner("🔄 Đang truy vấn dữ liệu từ Google Cloud..."):
+            # Thứ tự ưu tiên: Barcode -> Tên
+            res = get_price_from_api(barcode_in, price_in)
+            
+            if not res:
+                st.write("⚠️ Barcode không thấy giá, đang thử tìm theo Tên...")
+                res = get_price_from_api(name_in, price_in)
 
-                    st.write(f"🔍 Đang truy vấn dữ liệu...")
-                    # Thử tìm theo Barcode trước
-                    res, ss = scrape_with_screenshot(page, barcode_in, price_in)
-                    
-                    if not res:
-                        st.write(f"⚠️ Thử lại với tên sản phẩm...")
-                        res, ss = scrape_with_screenshot(page, name_in, price_in)
-
-                    # HIỂN THỊ SCREENSHOT
-                    if ss:
-                        with st.expander("📷 XEM ẢNH CHỤP MÀN HÌNH GOOGLE", expanded=True):
-                            st.image(ss, caption="Kết quả thực tế từ trình duyệt đám mây")
-                    
-                    if res:
-                        st.success("✅ Đã tìm thấy giá!")
-                        st.table(pd.DataFrame([res]))
-                    else:
-                        st.warning("❌ Không tìm thấy giá phù hợp trong ảnh trên.")
-                    
-                    browser.close()
-            except Exception as e:
-                st.error(f"Lỗi hệ thống: {str(e)}")
+            if res:
+                diff = res['Giá TT'] - price_in
+                res['Chênh lệch (%)'] = f"{(diff / price_in * 100):+.1f}%"
+                st.success("✅ Đã tìm thấy giá thị trường!")
+                st.table(pd.DataFrame([res]))
+            else:
+                st.error("❌ Không tìm thấy giá phù hợp. Hãy thử kiểm tra lại tên sản phẩm.")
