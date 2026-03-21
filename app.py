@@ -2,114 +2,99 @@ import streamlit as st
 import pandas as pd
 from playwright.sync_api import sync_playwright
 import re
-import subprocess
 import time
 
-# --- 1. SETUP HỆ THỐNG ---
-@st.cache_resource
-def install_browser():
-    try:
-        subprocess.run(["playwright", "install", "chromium"], check=True)
-    except Exception: pass
+st.set_page_config(page_title="Genshai Web Ultimate V37.2", layout="wide")
 
-install_browser()
-
-st.set_page_config(page_title="Genshai Google Pro V31.1", layout="wide")
+# --- KẾT NỐI BROWSERLESS ---
+SBR_WS_ENDPOINT = st.sidebar.text_input("Browserless Token", value="2UBSKVhZ0O0zDyk4407ed0", type="password")
 
 def clean_price(text):
     if not text: return 0
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-# --- 2. LOGIC GOOGLE NÂNG CAO ---
-
-def scrape_google_stealth(page, search_key, mode):
+def scrape_google_precision(page, query, gia_genshai):
     """
-    Sử dụng Selector đa điểm và quét văn bản sâu để bắt được giá Co.op/Lotte 
-    ngay cả khi div.g bị ẩn.
+    Sử dụng CSS Selectors để bốc chính xác giá từ các khối kết quả Google.
     """
     try:
-        # Sử dụng URL tìm kiếm có tham số hl=vi để ưu tiên kết quả Việt Nam
-        url = f"https://www.google.com/search?q=giá+bán+{search_key.replace(' ', '+')}&hl=vi"
-        page.goto(url, wait_until="networkidle", timeout=25000)
-        time.sleep(3) # Chờ Google render Rich Snippets (giá hiển thị trực tiếp)
+        url = f"https://www.google.com/search?q=giá+bán+{query.replace(' ', '+')}&hl=vi&gl=vn"
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
         
-        # Thử nhiều loại Selector khác nhau vì Google thường đổi class trên Cloud
-        selectors = ["div.g", ".tF2Cxc", ".v7W49e", "div[data-hveid]"]
+        # Chờ các khối giá (Shopping/Search) render xong
+        time.sleep(5)
+
+        valid_prices = []
+
+        # CHIẾN THUẬT 1: Tìm trong các thẻ hiển thị giá phổ biến của Google (Shopping/Rich Snippets)
+        # Các selector này nhắm thẳng vào các con số có đơn vị tiền tệ
+        selectors = [
+            "span[style*='color']", ".fG8Fp", ".sh-dlr__list-result", 
+            "div[data-p]", ".T8Zfbe", "span:has-text('₫')", "span:has-text('đ')"
+        ]
         
         for selector in selectors:
-            items = page.query_selector_all(selector)
-            if items:
-                for item in items:
-                    text = item.inner_text()
-                    if "₫" in text or "đ" in text:
-                        price = clean_price(text)
-                        # Bộ lọc giá lẻ gia vị/đồ dùng (10k - 200k)
-                        if 10000 < price < 200000:
-                            link_elem = item.query_selector("a")
-                            link = link_elem.get_attribute("href") if link_elem else url
-                            return {"Nguồn": f"Google ({mode})", "Giá TT": price, "Link": link}
+            elements = page.query_selector_all(selector)
+            for el in elements:
+                txt = el.inner_text()
+                if "₫" in txt or "đ" in txt:
+                    p = clean_price(txt)
+                    # Lọc giá rác (ví dụ 150k mốc Lotte) và giá sỉ
+                    if gia_genshai * 0.4 < p < gia_genshai * 1.8:
+                        valid_prices.append(p)
 
-        # PHƯƠNG ÁN CUỐI: Quét văn bản toàn trang nếu các Selector đều thất bại
-        full_text = page.evaluate("() => document.body.innerText")
-        # Regex tìm các cụm: số + khoảng trắng (tùy chọn) + đ/₫
-        price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', full_text)
-        if price_matches:
-            for match in price_matches:
-                p = clean_price(match)
-                if 10000 < p < 200000:
-                    return {"Nguồn": f"Google ({mode} - Text Scan)", "Giá TT": p, "Link": url}
-                    
-    except Exception: return None
+        # CHIẾN THUẬT 2: Dự phòng bằng cách quét toàn bộ văn bản nếu CSS Selector thất bại
+        if not valid_prices:
+            full_text = page.evaluate("() => document.body.innerText")
+            matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', full_text)
+            for m in matches:
+                p = clean_price(m)
+                if gia_genshai * 0.4 < p < gia_genshai * 1.8:
+                    valid_prices.append(p)
+        
+        if valid_prices:
+            # Lấy giá sát nhất với giá Genshai để đảm bảo cùng quy cách đóng gói
+            best_price = min(valid_prices, key=lambda x: abs(x - gia_genshai))
+            return {"Nguồn": "Google Precision", "Giá TT": best_price, "Link": url}
+            
+    except Exception as e:
+        st.error(f"Lỗi: {e}")
     return None
 
-# --- 3. ĐIỀU PHỐI ---
-def start_process(name, barcode, gia_niem_yet):
-    final_res = None
-    with sync_playwright() as p:
-        # Cấu hình Stealth mạnh mẽ để tránh bị Google chặn 0 khối
-        browser = p.chromium.launch(headless=True, args=[
-            "--no-sandbox", 
-            "--disable-blink-features=AutomationControlled"
-        ])
-        # Giả lập thiết bị thật với độ phân giải cao
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={'width': 1920, 'height': 1080}
-        )
-        page = context.new_page()
-
-        # BƯỚC 1: Tìm theo Barcode (Ưu tiên tuyệt đối)
-        st.write(f"🔍 Đang tìm Barcode {barcode}...")
-        final_res = scrape_google_stealth(page, barcode, "Barcode")
-        
-        # BƯỚC 2: Tìm theo Tên SP (Nếu bước 1 không ra)
-        if not final_res:
-            st.write(f"⚠️ Đang tìm theo Tên: {name}...")
-            final_res = scrape_google_stealth(page, name, "Tên SP")
-
-        browser.close()
-
-    if final_res and gia_niem_yet > 0:
-        diff = final_res['Giá TT'] - gia_niem_yet
-        final_res['Chênh lệch (%)'] = f"{(diff / gia_niem_yet * 100):+.1f}%"
-    
-    return [final_res] if final_res else []
-
 # --- UI ---
-st.title("🚀 Genshai Google Pro V31.1")
+st.title("🚀 Genshai Web Ultimate V37.2")
 
-with st.form("main_form"):
-    c1, c2, c3 = st.columns(3)
-    barcode_in = c1.text_input("Mã Barcode", value="8851130050753")
-    name_in = c2.text_input("Tên sản phẩm", value="Kiwi - Dao Bào Vỏ 217")
-    price_in = c3.number_input("Giá niêm yết (Genshai)", value=81400)
-    submitted = st.form_submit_button("KIỂM TRA GOOGLE")
+with st.form("ultimate_form"):
+    c1, c2, c3 = st.columns([1, 2, 1])
+    barcode_in = c1.text_input("Barcode", value="8851130050753")
+    name_in = c2.text_input("Tên SP", value="Kiwi - Dao Bào Vỏ 217")
+    price_in = c3.number_input("Giá Genshai", value=81400)
+    submitted = st.form_submit_button("CÀN QUÉT DỮ LIỆU")
 
 if submitted:
-    with st.spinner("Đang thực hiện quét Google bằng công nghệ Stealth..."):
-        data = start_process(name_in, barcode_in, price_in)
-        if data:
-            st.table(pd.DataFrame(data))
-        else:
-            st.error("Google vẫn đang chặn truy cập hoặc không tìm thấy khối div.g. Hãy thử lại sau vài phút.")
+    if not SBR_WS_ENDPOINT:
+        st.error("Hưng cần Token Browserless để chạy trên Web.")
+    else:
+        with sync_playwright() as p:
+            with st.spinner("🔄 Trình duyệt đám mây đang truy tìm giá..."):
+                browser = p.chromium.connect_over_cdp(f"wss://chrome.browserless.io?token={SBR_WS_ENDPOINT}")
+                page = browser.new_context().new_page()
+
+                # Ưu tiên Barcode -> Tên
+                st.write(f"🔍 Bước 1: Tìm theo Barcode...")
+                res = scrape_google_precision(page, barcode_in, price_in)
+                
+                if not res:
+                    st.write(f"⚠️ Bước 2: Tìm theo Tên sản phẩm...")
+                    res = scrape_google_precision(page, name_in, price_in)
+
+                if res:
+                    diff = res['Giá TT'] - price_in
+                    res['Chênh lệch (%)'] = f"{(diff / price_in * 100):+.1f}%"
+                    st.success("✅ Đã tìm thấy kết quả khớp!")
+                    st.table(pd.DataFrame([res]))
+                else:
+                    st.error("❌ Google không hiển thị giá phù hợp. Hãy thử rút ngắn tên sản phẩm.")
+                
+                browser.close()
