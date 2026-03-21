@@ -3,30 +3,29 @@ import pandas as pd
 import requests
 import re
 
-st.set_page_config(page_title="Genshai API Pro V38.0", layout="wide")
+st.set_page_config(page_title="Genshai API Pro V38.1", layout="wide")
 
-# --- CẤU HÌNH GOOGLE API ---
-# Hưng dán 2 mã vừa lấy vào đây hoặc nhập ở Sidebar
-API_KEY = st.sidebar.text_input("Google API Key", type="password")
-SEARCH_ENGINE_ID = st.sidebar.text_input("Search Engine ID (CX)")
+# --- CẤU HÌNH SIDEBAR ---
+with st.sidebar:
+    st.header("Cài đặt API")
+    api_key = st.text_input("Google API Key", value="AlzaSyB8smn4fvYfs39EUznk...", type="password")
+    cx_id = st.text_input("Search Engine ID (CX)", value="61025d0bba9a249bf")
 
 def clean_price(text):
     if not text: return 0
-    # Xử lý cả định dạng giá trong snippet (VD: 81.400đ, Giá: 85.000...)
+    # Xử lý các định dạng giá: 81.400, 81400, 81.400đ
     digits = re.sub(r'\D', '', str(text))
     return int(digits) if digits else 0
 
-def get_price_from_api(query, gia_genshai):
-    """
-    Sử dụng Google Custom Search API để lấy kết quả.
-    """
+def get_google_api_price(query, gia_genshai):
     url = "https://www.googleapis.com/customsearch/v1"
+    # Thêm tham số 'cr=countryVN' để ép tìm kết quả tại VN
     params = {
-        "key": API_KEY,
-        "cx": SEARCH_ENGINE_ID,
-        "q": f"giá bán {query}",
-        "gl": "vn", # Giới hạn kết quả tại Việt Nam
-        "hl": "vi"  # Ngôn ngữ tiếng Việt
+        "key": api_key,
+        "cx": cx_id,
+        "q": f"giá bán \"{query}\"", # Để trong ngoặc kép để tìm chính xác
+        "cr": "countryVN",
+        "hl": "vi"
     }
 
     try:
@@ -36,34 +35,34 @@ def get_price_from_api(query, gia_genshai):
         if "items" not in data:
             return None
 
-        valid_prices = []
+        found_prices = []
         for item in data["items"]:
-            # API trả về Tiêu đề và Đoạn mô tả (Snippet)
-            text_to_scan = item.get("title", "") + " " + item.get("snippet", "")
+            # Quét cả Tiêu đề và Snippet
+            text = item.get("title", "") + " " + item.get("snippet", "")
+            # Tìm các con số có chữ đ hoặc ₫ đi kèm
+            matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', text)
             
-            # Tìm giá tiền trong văn bản
-            price_matches = re.findall(r'(\d{1,3}(?:[\.,]\d{3})+)\s?[₫đ]', text_to_scan)
-            
-            for m in price_matches:
+            for m in matches:
                 p = clean_price(m)
-                # Lọc giá theo ngưỡng Genshai
+                # Biên độ lọc: 50% - 150% giá Genshai để tránh nhặt nhầm giá sỉ/giá thùng
                 if gia_genshai * 0.5 < p < gia_genshai * 1.5:
-                    valid_prices.append({"Giá TT": p, "Nguồn": item.get("displayLink"), "Link": item.get("link")})
+                    found_prices.append({
+                        "Nguồn": item.get("displayLink"),
+                        "Giá TT": p,
+                        "Link": item.get("link")
+                    })
         
-        if valid_prices:
-            # Chọn kết quả có giá sát với Genshai nhất
-            best_match = min(valid_prices, key=lambda x: abs(x["Giá TT"] - gia_genshai))
-            return best_match
-
-    except Exception as e:
-        st.error(f"Lỗi kết nối API: {e}")
+        if found_prices:
+            # Ưu tiên giá gần nhất với giá Genshai
+            return min(found_prices, key=lambda x: abs(x["Giá TT"] - gia_genshai))
+    except:
+        return None
     return None
 
-# --- GIAO DIỆN ---
-st.title("🚀 Genshai API Pro V38.0")
-st.info("Hệ thống sử dụng Google API chính chủ - Không Captcha, không lỗi trình duyệt.")
+# --- UI ---
+st.title("🚀 Genshai API Pro V38.1")
 
-with st.form("api_form"):
+with st.form("search_form"):
     c1, c2, c3 = st.columns([1, 2, 1])
     barcode_in = c1.text_input("Barcode", value="8851130050753")
     name_in = c2.text_input("Tên SP", value="Kiwi - Dao Bào Vỏ 217")
@@ -71,21 +70,21 @@ with st.form("api_form"):
     submitted = st.form_submit_button("TRA CỨU NGAY")
 
 if submitted:
-    if not API_KEY or not SEARCH_ENGINE_ID:
-        st.error("Hưng cần nhập đủ API Key và Search Engine ID ở Sidebar.")
+    if not api_key or not cx_id:
+        st.error("Vui lòng điền đủ thông tin API ở Sidebar.")
     else:
-        with st.spinner("🔄 Đang truy vấn dữ liệu từ Google Cloud..."):
-            # Thứ tự ưu tiên: Barcode -> Tên
-            res = get_price_from_api(barcode_in, price_in)
+        with st.spinner("🔄 Đang truy xuất dữ liệu từ Google API..."):
+            # Thứ tự: Barcode ưu tiên hơn
+            res = get_google_api_price(barcode_in, price_in)
             
             if not res:
-                st.write("⚠️ Barcode không thấy giá, đang thử tìm theo Tên...")
-                res = get_price_from_api(name_in, price_in)
+                st.info("⚠️ Barcode không ra kết quả, đang thử tìm theo Tên...")
+                # Rút gọn tên nếu quá dài để tăng tỉ lệ khớp
+                short_name = " ".join(name_in.split()[:5]) 
+                res = get_google_api_price(short_name, price_in)
 
             if res:
-                diff = res['Giá TT'] - price_in
-                res['Chênh lệch (%)'] = f"{(diff / price_in * 100):+.1f}%"
                 st.success("✅ Đã tìm thấy giá thị trường!")
                 st.table(pd.DataFrame([res]))
             else:
-                st.error("❌ Không tìm thấy giá phù hợp. Hãy thử kiểm tra lại tên sản phẩm.")
+                st.error("❌ Không tìm thấy giá phù hợp. Mẹo: Hãy vào trang cài đặt CX và bật 'Search the entire web'.")
