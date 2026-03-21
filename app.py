@@ -7,8 +7,8 @@ st.set_page_config(page_title="Genshai API Pro V38.0", layout="wide")
 
 # --- CẤU HÌNH GOOGLE API ---
 # Hưng dán 2 mã vừa lấy vào đây hoặc nhập ở Sidebar
-API_KEY = st.sidebar.text_input("AIzaSyB8smn4fvYfs39EUznKtrVIoq33eUfrbxo", type="password")
-SEARCH_ENGINE_ID = st.sidebar.text_input("61025d0bba9a249bf")
+API_KEY = st.sidebar.text_input("Google API Key", type="password")
+SEARCH_ENGINE_ID = st.sidebar.text_input("Search Engine ID (CX)")
 
 def clean_price(text):
     if not text: return 0
